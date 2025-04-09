@@ -3,7 +3,7 @@ import sqlite3
 import schedule
 import time
 from datetime import datetime, timedelta
-from flask import Flask, request, jsonify, render_template, redirect, url_for
+from flask import Flask, request, jsonify, render_template, redirect, url_for,flash
 import json
 import os
 from google.oauth2 import service_account
@@ -15,14 +15,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-print(os.getenv("OPENAI_API_KEY"))
-
 # OpenAI client setup with API key directly included
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # Google Calendar setup
 SCOPES = ['https://www.googleapis.com/auth/calendar']
-SERVICE_ACCOUNT_FILE = '/etc/secrets/credentials.json'  # Path to your Google service account JSON key
+SERVICE_ACCOUNT_FILE = 'credentials.json'  # Path to your Google service account JSON key
 
 credentials = service_account.Credentials.from_service_account_file(
     SERVICE_ACCOUNT_FILE, scopes=SCOPES)
@@ -31,6 +29,7 @@ CALENDAR_ID = 'd1f1f9507ffefdcacb64c9cf194b57ed20450b2fff09eba084552ce184e6ba9f@
 
 # Flask setup
 app = Flask(__name__)
+app.secret_key = os.getenv('FLASK_SECRET_KEY', 'dev-secret-key')  # Secure secret key for sessions
 
 # Database setup
 conn = sqlite3.connect('tasks.db', check_same_thread=False)
@@ -92,14 +91,12 @@ def add_task_to_calendar(task):
             'end': {
                 'dateTime': end_time.isoformat(),
                 'timeZone': 'UTC',
-            },
-            'visibility': 'default'
+            }
         }
         created_event = calendar_service.events().insert(calendarId=CALENDAR_ID, body=event).execute()
-        print("Event created:", created_event.get('htmlLink'))
         return created_event.get('id')
     except Exception as e:
-        print("Failed to add task to Google Calendar:", e)
+        flash(f"Failed to create Google Calendar event: {e}", "error")
         return None
 
 def get_all_tasks():
@@ -112,9 +109,8 @@ def delete_task(task_id):
     if result and result[0]:
         try:
             calendar_service.events().delete(calendarId=CALENDAR_ID, eventId=result[0]).execute()
-            print("Event deleted from Google Calendar")
         except Exception as e:
-            print("Failed to delete event from Google Calendar:", e)
+            flash(f"Failed to delete Google Calendar event: {e}", "error")
     c.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
     conn.commit()
 
@@ -127,25 +123,45 @@ def check_due_tasks():
     now = datetime.now()
     c.execute("SELECT id, name, deadline FROM tasks WHERE notified = 0")
     tasks = c.fetchall()
+    reminders = []
     for task in tasks:
         deadline = datetime.strptime(task[2], "%Y-%m-%d %H:%M")
         if now >= deadline - timedelta(minutes=15):
-            send_reminder(task)
+            reminders.append(task[1])
+            c.execute("UPDATE tasks SET notified = 1 WHERE id = ?", (task[0],))
+    conn.commit()
+    return reminders
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
     if request.method == 'POST':
-        user_input = request.form['prompt']
-        task = extract_task_details(user_input)
-        add_task_to_db(task)
+        user_input = request.form.get('prompt')
+        try:
+            task = extract_task_details(user_input)
+            add_task_to_db(task)
+            flash("✅ Task added successfully!", "success")
+        except Exception as e:
+            flash(f"❌ Failed to add task: {e}", "error")
         return redirect(url_for('index'))
+
     tasks = get_all_tasks()
+    reminders = check_due_tasks()
+
+    if reminders:
+        for task_name in reminders:
+            flash(f"🔔 Reminder: {task_name} is due soon!", "info")
+    else:
+        flash("✅ No reminders at this time.", "info")
+
     return render_template('index.html', tasks=tasks)
+
 
 @app.route('/delete/<int:task_id>', methods=['POST'])
 def delete(task_id):
     delete_task(task_id)
+    flash("🗑️ Task deleted successfully.", "success")
     return redirect(url_for('index'))
+
     
     
 def delete_google_calendar_event(event_id):
@@ -179,50 +195,5 @@ if __name__ == '__main__':
             time.sleep(60)
 
     Thread(target=run_scheduler, daemon=True).start()
-
-    os.makedirs("templates", exist_ok=True)
-    with open("templates/index.html", "w") as f:
-        f.write('''
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Task Scheduler</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 40px; background-color: #f4f4f4; }
-        h1 { color: #333; }
-        form { margin-bottom: 20px; background: #fff; padding: 20px; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        textarea { width: 100%; padding: 10px; margin-bottom: 10px; height: 100px; }
-        button { padding: 10px 15px; background-color: #28a745; color: white; border: none; cursor: pointer; margin-top: 10px; }
-        button.delete { background-color: #dc3545; margin-left: 10px; }
-        ul { list-style-type: none; padding: 0; }
-        li { background-color: white; margin-bottom: 10px; padding: 15px; border-radius: 5px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
-    </style>
-</head>
-<body>
-    <h1>AI Task Scheduler</h1>
-    <form method="POST">
-        <label>Enter your task details:</label>
-        <textarea name="prompt" placeholder="e.g. Schedule a meeting with John on 07/04/2025 at 10 AM, priority high, 30 minutes"></textarea>
-        <button type="submit">Add Task</button>
-    </form>
-
-    <h2>Your Tasks</h2>
-    <ul>
-        {% for task in tasks %}
-        <li>
-            <strong>{{ task[1] }}</strong><br>
-            <small>Due: {{ task[2] }}</small><br>
-            <small>Priority: {{ task[3] }} | Duration: {{ task[4] }} min</small>
-            <form action="/delete/{{ task[0] }}" method="POST" style="display:inline;">
-                <button class="delete" type="submit">Delete</button>
-            </form>
-        </li>
-        {% endfor %}
-    </ul>
-</body>
-</html>
-''')
 
     app.run(host='0.0.0.0',debug=True,port=5001)
