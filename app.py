@@ -22,7 +22,7 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # Google Calendar setup
 SCOPES = ['https://www.googleapis.com/auth/calendar']
-SERVICE_ACCOUNT_FILE = 'credentials.json'  # Path to your Google service account JSON key
+SERVICE_ACCOUNT_FILE = '/etc/secrets/credentials.json'  # Path to your Google service account JSON key
 
 credentials = service_account.Credentials.from_service_account_file(
     SERVICE_ACCOUNT_FILE, scopes=SCOPES)
